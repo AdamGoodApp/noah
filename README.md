@@ -88,13 +88,13 @@ print("Phishing   :", answers["is_phishing"]["noul"])
 
 ---
 
-## HTTP API and Runpod Serverless
+## Runpod Queue Serverless
 
-The repository includes a FastAPI service that runs the same `agent.predict(state, questions)` flow. `POST /predict` returns the complete result directly (`model`, `answers`, and `usage`), without a job envelope.
+The repository includes a Queue worker that runs the same `agent.predict(state, questions)` flow. Runpod accepts `{"input": {"state": ..., "questions": ...}}` jobs and wraps the complete prediction (`model`, `answers`, and `usage`) in the job's `output`. Only Runpod's platform bearer key authenticates remote clients; the worker has no separate application credential or HTTP service.
 
 ### Run locally
 
-The service requires Python 3.10 or later; this does not change the standalone library's Python requirement.
+The worker requires Python 3.10 or later; this does not change the standalone library's Python requirement.
 
 ```bash
 python3 -m venv .venv
@@ -103,29 +103,11 @@ python -m pip install -r requirements-server.txt .
 cp .env.example .env
 ```
 
-Set `API_AUTH_TOKEN` in `.env` to your own generated secret. The server refuses to start without it. Existing environment variables take precedence over `.env`.
+The optional `.env` is for local configuration; existing environment variables take precedence. No API key is required for a local SDK test. Define a public synthetic job and run it through the [SDK's local test mode](https://docs.runpod.io/serverless/development/local-testing):
 
 ```bash
-# CPU development, including Macs without NVIDIA CUDA:
-LAYA_DEVICE=cpu python api.py
-
-# On a CUDA-capable machine, omit the CPU override:
-# python api.py
-```
-
-The first startup downloads the pinned `convaiinnovations/laya` model. Later starts reuse the cache; the model is loaded once per process, not once per request. Wait for `GET /ping` to return HTTP 200 before predicting.
-
-In another terminal, load your own `.env` and call the API:
-
-```bash
-set -a
-source .env
-set +a
-
-curl --fail-with-body http://localhost:8000/predict \
-  -H "X-API-Token: $API_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
+JOB_INPUT='{
+  "input": {
     "state": {"message": "Please refund the duplicate charge today."},
     "questions": {
       "department": {
@@ -143,86 +125,159 @@ curl --fail-with-body http://localhost:8000/predict \
         "instructions": "Does the customer request a refund?"
       }
     }
-  }'
+  }
+}'
+
+# CPU development, including Macs without NVIDIA CUDA:
+LAYA_DEVICE=cpu python handler.py --test_input "$JOB_INPUT"
+
+# On a CUDA-capable machine:
+# python handler.py --test_input "$JOB_INPUT"
 ```
 
-`state` accepts an object, string, or JSON list. `questions` must be nonempty. Choice criteria require at least two labels (a dictionary or distinct-label list); score criteria require at least two rubric strings. Noul criteria can optionally describe `"false"` and `"true"`. All questions require string instructions; unknown fields and invalid question types are rejected.
+The first startup downloads the pinned `convaiinnovations/laya` model. Later starts reuse the cache. The model loads once per process **before** the SDK starts accepting jobs; initialization failure stops the worker. Prediction is synchronous and serialized per worker. Do not enable concurrent-handler processing.
 
-| Response | Meaning |
+`input.state` accepts an object, string, or JSON list. `input.questions` must be nonempty. Choice criteria require at least two labels (a dictionary or distinct-label list); score criteria require at least two rubric strings. Noul criteria can optionally describe `"false"` and `"true"`. All questions require string instructions; unknown fields and invalid question types are rejected.
+
+### Submit and retrieve jobs
+
+After deploying the Queue endpoint, set `RUNPOD_ENDPOINT_ID` to its ID. **There is no new live Queue endpoint ID documented yet.** Set `RUNPOD_API_KEY` in your client environment or load your private local `.env`; never copy the client key into Runpod's worker environment.
+
+```bash
+# Client terminal only; .env must be a file you control.
+set -a
+source .env
+set +a
+export RUNPOD_ENDPOINT_ID="YOUR_QUEUE_ENDPOINT_ID"
+
+# Asynchronous submission is preferable for a first request/cold start.
+curl --fail-with-body "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/run" \
+  -H "Authorization: Bearer $RUNPOD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$JOB_INPUT"
+```
+
+The response initially contains a job ID and status, for example `{"id":"<job-id>","status":"IN_QUEUE"}`. Save that ID and poll the **same job**, waiting several seconds between requests:
+
+```bash
+export JOB_ID="ID_RETURNED_BY_RUN"
+curl --fail-with-body \
+  "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
+  -H "Authorization: Bearer $RUNPOD_API_KEY"
+```
+
+For a synchronous submission instead of `/run`:
+
+```bash
+curl --fail-with-body --max-time 310 \
+  "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/runsync?wait=300000" \
+  -H "Authorization: Bearer $RUNPOD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$JOB_INPUT"
+```
+
+`/runsync` waits up to the requested interval (milliseconds; currently up to 300000). Cold starts include capacity wait, image startup, model download if uncached, and model loading. If a response is still `IN_QUEUE` or `IN_PROGRESS`, retain its ID and use `/status/{id}` rather than submitting duplicate work. The wait parameter is not an execution timeout or a result-retention setting.
+
+A completed job has this shape. **Numbers below are illustrative, not measured predictions**; Runpod may also include timing/worker metadata:
+
+```json
+{
+  "id": "<job-id>",
+  "status": "COMPLETED",
+  "output": {
+    "model": "laya-rl-agent",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "choice": "billing",
+        "probabilities": {"billing": 0.95, "technical": 0.05},
+        "confidence": 0.8,
+        "action": {"act_probability": 0.9}
+      },
+      "urgency": {
+        "type": "score",
+        "score": 1.1,
+        "legend": {"0": "not urgent", "1": "soon", "2": "critical"},
+        "probabilities": {"0": 0.1, "1": 0.7, "2": 0.2},
+        "confidence": 0.6,
+        "action": {"act_probability": 0.8}
+      },
+      "refund_requested": {
+        "type": "noul",
+        "noul": 0.95,
+        "confidence": 0.95,
+        "action": {"act_probability": 0.9}
+      }
+    },
+    "usage": {"input_tokens": 120, "output_tokens": 0}
+  }
+}
+```
+
+Consumers must inspect `status`, not just the HTTP status code:
+
+| Job status | Meaning |
 |---|---|
-| `200` from `/predict` | Complete prediction result |
-| `401` | Missing or incorrect `X-API-Token` |
-| `422` | Invalid request or question options |
-| `503` from `/predict` | Model not ready |
-| `500` | Unexpected inference failure |
+| `IN_QUEUE` | Waiting for an initialized worker |
+| `IN_PROGRESS` | Worker is processing the job |
+| `COMPLETED` | Read the full prediction from `output` |
+| `FAILED` | Invalid input, unsupported question options, or inference failure; inspect the sanitized job error |
+| `TIMED_OUT` / `CANCELLED` | No successful prediction; handle as a terminal failure |
 
-The worker's unauthenticated `/ping` returns `204` while loading, `200` when ready, and `503` if initialization fails. Inference runs off the event loop and is serialized per worker, so health checks remain responsive.
+Validation and inference errors are raised as sanitized exceptions so Runpod marks the job **FAILED**, not `COMPLETED` with an error dictionary. The worker does not expose original input or original exception messages through those errors. Platform authentication errors are separate: a missing/invalid bearer key is rejected before the worker handles a job.
 
-### Docker
+Results are **not permanent storage**. Runpod currently documents `/run` results retained for **30 minutes after completion**, and `/runsync` results for **1 minute**. Retrieve and save needed results promptly; job TTL also limits overall lifetime, including queue time. See the [request lifecycle](https://docs.runpod.io/serverless/endpoints/send-requests) and [operation reference](https://docs.runpod.io/serverless/endpoints/operation-reference) for current limits.
 
-Build the Linux GPU image without downloading weights into it:
+### Docker and runtime configuration
+
+Build the Linux GPU image without downloading weights into it. Reuse `JOB_INPUT` from the local example for this one-shot SDK test:
 
 ```bash
 docker build --platform linux/amd64 -t noah-laya:local .
 docker volume create noah-laya-cache
-docker run --rm --gpus all --env-file .env \
-  -p 8000:8000 -v noah-laya-cache:/runpod-volume noah-laya:local
+docker run --rm --gpus all \
+  -v noah-laya-cache:/runpod-volume noah-laya:local \
+  python handler.py --test_input "$JOB_INPUT"
 ```
 
-For CPU-only container testing, replace `--gpus all` with `--platform linux/amd64 -e LAYA_DEVICE=cpu`. The image defaults to CUDA and rejects a missing GPU at initialization instead of silently declaring a CPU worker ready.
+For CPU-only container testing, replace `--gpus all` with `--platform linux/amd64 -e LAYA_DEVICE=cpu`. This does not verify CUDA. The image defaults to CUDA and rejects a missing GPU at initialization instead of silently declaring a CPU worker ready.
 
-Keep the optional cache overrides in `.env.example` commented when passing `.env` to Docker. The container must use the mounted volume, not an ephemeral local cache directory. Secrets, local model weights, and virtual environments are excluded from the build context.
+The deployed image's default command is `python handler.py`; Runpod supplies the Queue worker environment. No HTTP port or application health route needs exposing. **Do not pass the client `.env` using `--env-file`** or configure `RUNPOD_API_KEY` as a worker secret. Secrets, local model weights, and virtual environments are excluded from the build context.
 
 | Setting | Local default | Container / Runpod |
 |---|---|---|
-| `API_AUTH_TOKEN` | Required | Required runtime secret |
+| `RUNPOD_API_KEY` | Client-only; not needed for local SDK tests | Never pass to worker |
 | `LAYA_DEVICE` | `cuda`; explicitly use `cpu` or `mps` for development | `cuda` |
-| `PORT` | `8000` | `8000` |
-| `PORT_HEALTH` | Same HTTP server | `8000` |
-| `HEALTH_CHECK_PATH` | `/ping` | `/ping` |
 | `MODEL_CACHE_DIR` | `./.model-cache` | `/runpod-volume/models/laya` |
 | `HF_HOME` | Hugging Face default | `/runpod-volume/huggingface` |
 | `HF_TOKEN` | Optional; model is public | Optional runtime secret |
 
-The pinned model revision is `7c76b622dfc5cac71b2dc1c29873efe2ce509a05`. Initialization retains the weights, local encoder configuration, and tokenizer together; a shared file lock protects downloads and tokenizer compatibility updates. An atomic completion marker allows subsequent workers to load without contacting Hugging Face. A failed initialization never publishes a new ready marker. Do not delete or modify cache files while workers use them.
+Keep the image's persistent cache paths for Runpod. The mounted `/runpod-volume` must already exist and be writable; the worker refuses an ephemeral fallback. The pinned model revision is `7c76b622dfc5cac71b2dc1c29873efe2ce509a05`. Initialization retains the weights, local encoder configuration, and tokenizer together; a shared file lock protects downloads and tokenizer compatibility updates. An atomic completion marker allows subsequent workers to load without contacting Hugging Face. A failed initialization never publishes a new ready marker. Do not delete or modify cache files while workers use them.
 
 ### Deploy from GitHub
 
-Use Runpod's [GitHub integration](https://docs.runpod.io/serverless/workers/github-integration) and [Load Balancer endpoint mode](https://docs.runpod.io/serverless/load-balancing/overview), **not Queue mode**:
+Use Runpod's [GitHub integration](https://docs.runpod.io/serverless/workers/github-integration) with a **Queue** endpoint:
 
-1. Publish the implementation to `AdamGoodApp/noah`, branch `main`. Authorize Runpod's GitHub App for this repository only.
-2. Create a 10GB **standard network volume** named `noah-models` in `US-IL-1`, after checking the current storage quote and GPU availability. Runpod enforces a 10GB minimum.
-3. Create an endpoint named `noah-api` from that GitHub repository, using the root `Dockerfile` and endpoint type **Load Balancer**.
-4. Select one **RTX A5000 (24GB)** GPU in `US-IL-1`. The MCP/API uses pool `AMPERE_24`; select only A5000 by excluding other current members of that pool. Re-check pool membership when configuring it.
-5. Attach the new network volume; expose HTTP port `8000`, with `PORT=8000`, `PORT_HEALTH=8000`, and `HEALTH_CHECK_PATH=/ping`.
-6. Set `API_AUTH_TOKEN` as a runtime secret. Keep the image's cache paths and `LAYA_DEVICE=cuda`; do not bake `.env` into the image or pass a Runpod account API key into the container.
-7. Set minimum workers **0**, maximum workers **1**, idle timeout **5 seconds**, request-count scaling target **1**, FlashBoot enabled, and container disk **10GB**.
-8. Wait for the image build and model initialization, then verify `/predict` using the public sample above. Let the endpoint scale to zero and verify a subsequent worker reports a cache hit.
+1. Publish the implementation to `AdamGoodApp/noah`, branch **`queue-worker`**, and track that branch in Runpod. This keeps the old `main`-based endpoint live until the Queue replacement is verified; fast-forward `main` only after retiring the old endpoint. Authorize Runpod's GitHub App for this repository only.
+2. Reuse the existing **10GB standard network volume `noah-models` in `US-IL-1`**; do not create a duplicate or change storage tier.
+3. Create a Queue endpoint named **`noah-api`** from that GitHub repository using the root `Dockerfile`. Do not reuse a Load Balancer endpoint ID as a Queue ID.
+4. Select one **RTX A5000 (24GB)** GPU in `US-IL-1`. The MCP/API uses pool `AMPERE_24`; select only A5000 by excluding other current members of that pool. Re-check pool membership and stock when configuring it.
+5. Attach `noah-models`. Keep the image's cache paths and `LAYA_DEVICE=cuda`; configure no HTTP ports and no client bearer key in the worker.
+6. Set minimum workers **0**, maximum workers **1**, idle timeout **5 seconds**, **`QUEUE_DELAY` scaling with a target of 1 second**, FlashBoot enabled, and container disk **10GB**. Keep handler concurrency at one.
+7. Wait for the GitHub image build, then submit the public synthetic job above. Inspect job status and worker logs to verify successful CUDA initialization and inference without CPU fallback. Let the endpoint scale to zero and verify a subsequent worker reports a cache hit. Inspect the Builds tab to confirm the deployed commit rather than assuming source publication means deployment succeeded.
 
-Runpod's public request uses two independent credentials:
+**Storage and location:** a [network volume](https://docs.runpod.io/storage/network-volumes) restricts workers to its data center. This configuration uses standard storage and a 24GB GPU in `US-IL-1`. On 2026-09-18, the catalog quoted A5000 Serverless at **$0.69 per running worker-hour**, and the console quoted the existing 10GB standard volume at **$0.70/month** ($0.07/GB). Storage remains billable at zero workers. Pricing and stock can change.
 
-```bash
-curl --fail-with-body "https://$RUNPOD_ENDPOINT_ID.api.runpod.ai/predict" \
-  -H "Authorization: Bearer $RUNPOD_API_KEY" \
-  -H "X-API-Token: $API_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"state":"Please refund my duplicate payment.","questions":{"refund":{"type":"noul","instructions":"Is a refund requested?"}}}'
-```
+Runpod's [beta Global Volumes](https://docs.runpod.io/storage/globalvolume) are currently documented for Pods, and the connected Serverless tools expose no Global Volume attachment. They also lack file locking and atomic rename. **Do not point this cache initializer at a Global Volume.** Keep a POSIX-capable regional network volume for this Serverless worker.
 
-The Runpod bearer key authenticates at the platform; `X-API-Token` authenticates this application. Neither substitutes for the other. A cold start may return a platform “no workers available” response before initialization finishes; wait for readiness and retry the idempotent prediction. This endpoint's GitHub integration starts a new build when its tracked branch receives a push; inspect the Builds tab to confirm the deployed commit.
-
-**Storage and location:** a [network volume](https://docs.runpod.io/storage/network-volumes) restricts workers to its data center. This configuration prioritizes inexpensive standard storage and a 24GB GPU over an expensive Japan GPU; `US-IL-1` supports the selected combination. On 2026-09-18, the catalog quoted A5000 Serverless at **$0.69 per running worker-hour**, and the console quoted the 10GB standard volume at **$0.70/month** ($0.07/GB). Storage remains billable at zero workers. Pricing and stock can change.
-
-Runpod's [beta Global Volumes](https://docs.runpod.io/storage/globalvolume) are currently documented for Pods, and the connected Serverless tools expose no Global Volume attachment. They also lack file locking and atomic rename. **Do not point this cache initializer at a Global Volume.** Keep a POSIX-capable regional network volume for this Serverless service.
-
-### API regression checks
+### Worker regression checks
 
 ```bash
-python -m pip install pytest httpx
-python -m pytest tests/test_api.py tests/test_model_cache.py
+python -m pip install pytest
+python -m pytest tests/test_handler.py tests/test_model_cache.py
 ```
 
-These isolated checks cover authentication, request boundaries, health transitions, concurrent/cancelled requests, and cache failures. They do not replace a real-model HTTP smoke test or verification on an actual CUDA worker.
+These isolated checks cover job validation, complete results, sanitized failures, serialized inference, startup ordering, and cache failures. They do not replace a real-model SDK smoke test or verification on an actual CUDA worker.
 
 ---
 

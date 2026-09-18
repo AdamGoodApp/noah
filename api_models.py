@@ -1,4 +1,4 @@
-"""HTTP request types for the Laya prediction service."""
+"""Queue job input types for the Laya prediction worker."""
 
 from typing import Annotated, Literal
 

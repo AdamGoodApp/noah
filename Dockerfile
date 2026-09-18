@@ -3,9 +3,6 @@ FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime@sha256:77f17f843507062875ce8b
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000 \
-    PORT_HEALTH=8000 \
-    HEALTH_CHECK_PATH=/ping \
     MODEL_CACHE_DIR=/runpod-volume/models/laya \
     HF_HOME=/runpod-volume/huggingface \
     LAYA_DEVICE=cuda
@@ -19,7 +16,6 @@ COPY pyproject.toml setup.py README.md LICENSE requirements-server.txt ./
 COPY laya/ ./laya/
 RUN python -m pip install --no-cache-dir -r requirements-server.txt .
 
-COPY api.py api_models.py model_cache.py ./
+COPY handler.py api_models.py model_cache.py ./
 
-EXPOSE 8000
-CMD ["python", "api.py"]
+CMD ["python", "handler.py"]
