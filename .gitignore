@@ -24,3 +24,7 @@ wheels/
 .DS_Store
 .env
 .pypirc
+.env.*
+!.env.example
+.model-cache/
+.pytest_cache/
