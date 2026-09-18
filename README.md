@@ -191,9 +191,9 @@ The pinned model revision is `7c76b622dfc5cac71b2dc1c29873efe2ce509a05`. Initial
 Use Runpod's [GitHub integration](https://docs.runpod.io/serverless/workers/github-integration) and [Load Balancer endpoint mode](https://docs.runpod.io/serverless/load-balancing/overview), **not Queue mode**:
 
 1. Publish the implementation to `AdamGoodApp/noah`, branch `main`. Authorize Runpod's GitHub App for this repository only.
-2. Create a 5GB **High-Performance network volume** in `US-CA-2`, after checking the current storage quote and GPU availability.
-3. Create an endpoint from that GitHub repository, using the root `Dockerfile` and endpoint type **Load Balancer**.
-4. Select one **RTX A5000 (24GB)** GPU in `US-CA-2`. The MCP/API uses pool `AMPERE_24`; select only A5000 by excluding other current members of that pool. Re-check pool membership when configuring it.
+2. Create a 10GB **standard network volume** named `noah-models` in `US-IL-1`, after checking the current storage quote and GPU availability. Runpod enforces a 10GB minimum.
+3. Create an endpoint named `noah-api` from that GitHub repository, using the root `Dockerfile` and endpoint type **Load Balancer**.
+4. Select one **RTX A5000 (24GB)** GPU in `US-IL-1`. The MCP/API uses pool `AMPERE_24`; select only A5000 by excluding other current members of that pool. Re-check pool membership when configuring it.
 5. Attach the new network volume; expose HTTP port `8000`, with `PORT=8000`, `PORT_HEALTH=8000`, and `HEALTH_CHECK_PATH=/ping`.
 6. Set `API_AUTH_TOKEN` as a runtime secret. Keep the image's cache paths and `LAYA_DEVICE=cuda`; do not bake `.env` into the image or pass a Runpod account API key into the container.
 7. Set minimum workers **0**, maximum workers **1**, idle timeout **5 seconds**, request-count scaling target **1**, FlashBoot enabled, and container disk **10GB**.
@@ -211,7 +211,7 @@ curl --fail-with-body "https://$RUNPOD_ENDPOINT_ID.api.runpod.ai/predict" \
 
 The Runpod bearer key authenticates at the platform; `X-API-Token` authenticates this application. Neither substitutes for the other. A cold start may return a platform “no workers available” response before initialization finishes; wait for readiness and retry the idempotent prediction. Ordinary GitHub pushes do not deploy updates: Runpod's integration rebuilds on GitHub releases.
 
-**Storage and location:** a [network volume](https://docs.runpod.io/storage/network-volumes) restricts workers to its data center. This configuration prioritizes the inexpensive 24GB GPU over an expensive Japan GPU; US-CA-2 is the selected High-Performance-storage location. The catalog checked on 2026-09-18 quoted A5000 Serverless at **$0.69 per running worker-hour**. Premium storage is billed separately even at zero workers; confirm its regional quote in the console before creating it. Pricing and stock can change.
+**Storage and location:** a [network volume](https://docs.runpod.io/storage/network-volumes) restricts workers to its data center. This configuration prioritizes inexpensive standard storage and a 24GB GPU over an expensive Japan GPU; `US-IL-1` supports the selected combination. On 2026-09-18, the catalog quoted A5000 Serverless at **$0.69 per running worker-hour**, and the console quoted the 10GB standard volume at **$0.70/month** ($0.07/GB). Storage remains billable at zero workers. Pricing and stock can change.
 
 Runpod's [beta Global Volumes](https://docs.runpod.io/storage/globalvolume) are currently documented for Pods, and the connected Serverless tools expose no Global Volume attachment. They also lack file locking and atomic rename. **Do not point this cache initializer at a Global Volume.** Keep a POSIX-capable regional network volume for this Serverless service.
 
