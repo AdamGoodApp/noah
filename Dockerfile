@@ -10,6 +10,11 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/runpod-volume/huggingface \
     LAYA_DEVICE=cuda
 
+# ModernBERT's CUDA path uses Triton to compile its host-side driver.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml setup.py README.md LICENSE requirements-server.txt ./
 COPY laya/ ./laya/
 RUN python -m pip install --no-cache-dir -r requirements-server.txt .

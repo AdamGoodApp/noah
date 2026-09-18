@@ -209,7 +209,7 @@ curl --fail-with-body "https://$RUNPOD_ENDPOINT_ID.api.runpod.ai/predict" \
   -d '{"state":"Please refund my duplicate payment.","questions":{"refund":{"type":"noul","instructions":"Is a refund requested?"}}}'
 ```
 
-The Runpod bearer key authenticates at the platform; `X-API-Token` authenticates this application. Neither substitutes for the other. A cold start may return a platform “no workers available” response before initialization finishes; wait for readiness and retry the idempotent prediction. Ordinary GitHub pushes do not deploy updates: Runpod's integration rebuilds on GitHub releases.
+The Runpod bearer key authenticates at the platform; `X-API-Token` authenticates this application. Neither substitutes for the other. A cold start may return a platform “no workers available” response before initialization finishes; wait for readiness and retry the idempotent prediction. This endpoint's GitHub integration starts a new build when its tracked branch receives a push; inspect the Builds tab to confirm the deployed commit.
 
 **Storage and location:** a [network volume](https://docs.runpod.io/storage/network-volumes) restricts workers to its data center. This configuration prioritizes inexpensive standard storage and a 24GB GPU over an expensive Japan GPU; `US-IL-1` supports the selected combination. On 2026-09-18, the catalog quoted A5000 Serverless at **$0.69 per running worker-hour**, and the console quoted the 10GB standard volume at **$0.70/month** ($0.07/GB). Storage remains billable at zero workers. Pricing and stock can change.
 
